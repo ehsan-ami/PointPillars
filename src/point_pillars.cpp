@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cmath>
 #include <tuple>
+#include <random>
+#include <algorithm>
 namespace py = pybind11;
 
 struct IntPairHash {
@@ -19,14 +21,57 @@ struct IntPairHash {
 };
 
 struct PillarPoint {
+    int type;
     float x;
     float y;
-    float z;
-    float intensity;
     float xc;
     float yc;
-    float zc;
+    float xp;
+    float yp;
+    int step;
+    float vx;
+    float vy;
+    float ax;
+    float ay;
+    float yaw;
+    float omega;
 };
+// ponits type, x, y, step, vx, vy, ax, ay, yaw, omega [10D]
+// enum AgentType {vehicle, pedestrian, road};
+
+class OneHotEncoder{
+    private:
+        int num_categories = 0;
+    public:
+        OneHotEncoder(const int _num_categories){
+            num_categories = _num_categories;
+        }
+        std::vector<float> encodeCategory(int category_index){
+            std::string const msg = "ERROR: category index is"  + std::to_string(category_index) + "Number of cats" + std::to_string(num_categories);
+
+            if (category_index >= num_categories)
+                throw std::runtime_error("category_index must ve less than equal _num_categories) " + msg);
+            
+            std::vector<float> encoding(num_categories, 0.0);
+            encoding.at(category_index) = float(1.0);
+            return encoding;
+        }
+};
+
+void validatePointPillar(PillarPoint p){
+    if (p.type == 2){
+        double _sum = abs(p.vx) + abs(p.vy) + abs(p.ax) + abs(p.ay) + abs(p.step+1) + abs(p.yaw) + abs(p.omega);
+        if (_sum >= 0.0001)
+            throw std::runtime_error("invalid data for a map point");
+    }
+    else if (p.type == 1)
+    {
+        double _sum = abs(p.yaw) + abs(p.omega);
+        if (_sum >= 0.0001)
+            throw std::runtime_error("invalid data for a pedestrian point");
+    }
+    
+}
 
 pybind11::tuple createPillars(pybind11::array_t<float> points,
                               int maxPointsPerPillar,
@@ -37,49 +82,87 @@ pybind11::tuple createPillars(pybind11::array_t<float> points,
                               float xMax,
                               float yMin,
                               float yMax,
-                              float zMin,
-                              float zMax,
+                              int max_steps,
+                              int max_num_type,
                               bool printTime = false)
-{
+{   
+    
     std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
-
-    if (points.ndim() != 2 || points.shape()[1] != 4)
+    int dimension = max_num_type + max_steps + 1 + 12 ; // fake step for map points
+    if (points.ndim() != 3  || points.shape()[2] != 10)
     {
-        throw std::runtime_error("numpy array with shape (n, 4) expected (n being the number of points)");
+        throw std::runtime_error("numpy array with shape (batch_size, n,  10) expected (n being the number of points)");
     }
 
-    std::unordered_map<std::pair<uint32_t, uint32_t>, std::vector<PillarPoint>, IntPairHash> map;
+    int batch_size = points.shape()[0];
+    pybind11::array_t<float> tensor;
+    pybind11::array_t<int> indices;
 
-    for (int i = 0; i < points.shape()[0]; ++i)
-    {
-        if ((points.at(i, 0) < xMin) || (points.at(i, 0) >= xMax) || \
-            (points.at(i, 1) < yMin) || (points.at(i, 1) >= yMax) || \
-            (points.at(i, 2) < zMin) || (points.at(i, 2) >= zMax))
+    tensor.resize({batch_size, maxPillars, maxPointsPerPillar, dimension});
+    indices.resize({batch_size, maxPillars, 3});
+
+    for (int bi = 0; bi < batch_size; ++bi )
+    {   
+
+    std::unordered_map<std::pair<uint32_t, uint32_t>, std::vector<PillarPoint>, IntPairHash> map;
+    for (int i = 0; i < points.shape()[1]; ++i)
+    {   
+        int type = (int)points.at(bi, i,0);
+        if ( type < 0 || type >= max_num_type )
+            throw std::runtime_error("Error; type is not valid");
+
+        auto x = points.at(bi, i, 1);
+        auto y = points.at(bi, i, 2);
+
+        int step = (int)points.at(bi, i, 3);
+        if ((type == 0 || type == 1) && (step < 0 || step >= max_steps))
+            throw std::runtime_error("Error: invalid step number");
+        
+        float vx = points.at(bi, i, 4);
+        float vy = points.at(bi, i, 5);
+        float ax = points.at(bi, i, 6);
+        float ay = points.at(bi, i, 7);
+
+        float yaw = points.at(bi, i, 8);
+        yaw = atan2(sin(yaw), cos(yaw));
+
+        float omega = points.at(bi, i, 9);
+
+        
+        if (x < xMin || x >= xMax || y < yMin || y >= yMax)
         {
             continue;
         }
 
-        auto xIndex = static_cast<uint32_t>(std::floor((points.at(i, 0) - xMin) / xStep));
-        auto yIndex = static_cast<uint32_t>(std::floor((points.at(i, 1) - yMin) / yStep));
+        auto xIndex = static_cast<uint32_t>(std::floor((x - xMin) / xStep));
+        auto yIndex = static_cast<uint32_t>(std::floor((y - yMin) / yStep));
+
+        // point in local coordinate frame of each pillar
+        auto xp = x - ( xIndex * xStep + xMin ); 
+        auto yp = y - ( yIndex * yStep + yMin );
 
         PillarPoint p = {
-            points.at(i, 0),
-            points.at(i, 1),
-            points.at(i, 2),
-            points.at(i, 3),
-            0,
-            0,
-            0,
+            type,
+            x,
+            y,
+            0, //xc
+            0, //yc
+            xp,
+            yp,
+            step,
+            vx, // vx
+            vy, // vy
+            ax, // ax
+            ay, // ay
+            yaw,
+            omega, // omega
         };
+        validatePointPillar(p);
 
         map[{xIndex, yIndex}].emplace_back(p);
     }
 
-    pybind11::array_t<float> tensor;
-    pybind11::array_t<int> indices;
-
-    tensor.resize({1, maxPillars, maxPointsPerPillar, 7});
-    indices.resize({1, maxPillars, 3});
+    auto rng = std::default_random_engine {};
 
     int pillarId = 0;
     for (auto& pair: map)
@@ -91,31 +174,33 @@ pybind11::tuple createPillars(pybind11::array_t<float> points,
 
         float xMean = 0;
         float yMean = 0;
-        float zMean = 0;
         for (const auto& p: pair.second)
         {
             xMean += p.x;
             yMean += p.y;
-            zMean += p.z;
         }
         xMean /= pair.second.size();
         yMean /= pair.second.size();
-        zMean /= pair.second.size();
 
         for (auto& p: pair.second)
         {
             p.xc = p.x - xMean;
             p.yc = p.y - yMean;
-            p.zc = p.z - zMean;
         }
 
         auto xIndex = static_cast<int>(std::floor((xMean - xMin) / xStep));
         auto yIndex = static_cast<int>(std::floor((yMean - yMin) / yStep));
-        auto zMid   = (zMax - zMin) * 0.5f;
-        indices.mutable_at(0, pillarId, 1) = xIndex;
-        indices.mutable_at(0, pillarId, 2) = yIndex;
+        int max_x_index = static_cast<int>(std::floor((xMax-0.0001 - xMin) / xStep));
+        int max_y_index = static_cast<int>(std::floor((yMax-0.0001 - yMin) / yStep));
+
+        indices.mutable_at(bi, pillarId, 1) = max_y_index-yIndex;  // Image coordinate modification (swapped)
+        indices.mutable_at(bi, pillarId, 2) = xIndex;  // Image coordinate modification (swapped)
 
         int pointId = 0;
+
+        // shuffle to have all kind of points sampled
+        std::shuffle(std::begin(pair.second), std::end(pair.second), rng);
+
         for (const auto& p: pair.second)
         {
             if (pointId >= maxPointsPerPillar)
@@ -123,18 +208,52 @@ pybind11::tuple createPillars(pybind11::array_t<float> points,
                 break;
             }
 
-            tensor.mutable_at(0, pillarId, pointId, 0) = p.x - (xIndex * xStep + xMin);
-            tensor.mutable_at(0, pillarId, pointId, 1) = p.y - (yIndex * yStep + yMin);
-            tensor.mutable_at(0, pillarId, pointId, 2) = p.z - zMid;
-            tensor.mutable_at(0, pillarId, pointId, 3) = p.intensity;
-            tensor.mutable_at(0, pillarId, pointId, 4) = p.xc;
-            tensor.mutable_at(0, pillarId, pointId, 5) = p.yc;
-            tensor.mutable_at(0, pillarId, pointId, 6) = p.zc;
+            // type encoding
+            auto type_encoder = OneHotEncoder(max_num_type);
+            auto encoded_type = type_encoder.encodeCategory(p.type);
+            for (int i = 0; i < max_num_type; i++)
+            {
+                tensor.mutable_at(bi, pillarId, pointId, i) = encoded_type.at(i); 
+            }
+
+            int j = max_num_type;
+            tensor.mutable_at(bi, pillarId, pointId, j+0) = p.x - (0.5 * max_x_index * xStep + xMin);
+            tensor.mutable_at(bi, pillarId, pointId, j+1) = p.y - (0.5 * max_y_index * yStep + yMin);
+            tensor.mutable_at(bi, pillarId, pointId, j+2) = p.xc;
+            tensor.mutable_at(bi, pillarId, pointId, j+3) = p.yc;
+            tensor.mutable_at(bi, pillarId, pointId, j+4) = p.xp;
+            tensor.mutable_at(bi, pillarId, pointId, j+5) = p.yp;
+
+            // time encoding
+            auto time_encoder = OneHotEncoder(max_steps+1);
+            std::vector<float> encoded_time;
+            auto cf = 1.0;
+            if (p.type ==2){ // map elements
+                encoded_time = time_encoder.encodeCategory(0); // +1 is for the map points where ste=-1
+                
+            }
+            else{
+                encoded_time = time_encoder.encodeCategory(p.step+1); // +1 is for the map points where ste=-1
+            }
+            j = max_num_type + 6; // 9
+            for (int i = 0; i < max_steps+1; i++)
+            {
+                tensor.mutable_at(bi, pillarId, pointId, i + j) = encoded_time.at(i); 
+            }
+            j = max_num_type + 6 + max_steps + 1; // 20
+            
+            tensor.mutable_at(bi, pillarId, pointId, j+0) = p.vx; // 20
+            tensor.mutable_at(bi, pillarId, pointId, j+1) = p.vy; // 21
+            tensor.mutable_at(bi, pillarId, pointId, j+2) = p.ax; // 22
+            tensor.mutable_at(bi, pillarId, pointId, j+3) = p.ay; //23
+            tensor.mutable_at(bi, pillarId, pointId, j+4) = p.yaw; //24
+            tensor.mutable_at(bi, pillarId, pointId, j+5) = p.omega; //25
 
             pointId++;
         }
 
         pillarId++;
+    }
     }
 
     pybind11::tuple result = pybind11::make_tuple(tensor, indices);
@@ -146,6 +265,48 @@ pybind11::tuple createPillars(pybind11::array_t<float> points,
 
     return result;
 }
+
+// pybind11::tuple createPillars(pybind11::array_t<float> points,
+//                               int maxPointsPerPillar,
+//                               int maxPillars,
+//                               float xStep,
+//                               float yStep,
+//                               float xMin,
+//                               float xMax,
+//                               float yMin,
+//                               float yMax,
+//                               int max_steps,
+//                               int max_num_type,
+//                               bool printTime = false)
+// {   
+//     if (points.ndim() != 3 || points.shape()[2] != 10)
+//     {
+//         throw std::runtime_error("numpy array with shape (batch_size, n,  10) expected (n being the number of points)");
+//     }
+
+//     int batch_size = points.shape()[0];
+//     pybind11::array_t<float> tensor;
+//     pybind11::array_t<int> indices;
+//     tensor.resize({batch_size, maxPillars, maxPointsPerPillar, dimension});
+//     indices.resize({batch_size, maxPillars, 3});
+
+//     for (int i = 0; i < batch_size; i++)
+//     {
+//         auto result = createPillars_internal(points, maxPointsPerPillar, maxPillars, 
+//                                                 xStep, yStep, xMin, xMax, yMin, yMax,
+//                                                 max_steps, max_num_type, printTime);
+//         pybind11::array_t<float> tensor_a;
+//         pybind11::array_t<float> tensor_b;
+//         tensor_a, tensor_b = *result;
+//         tensor.mutable_at(i, pybind11::ellipsis()) = tensor_a;
+//         indices.mutable_at(i, pybind11::ellipsis()) = tensor_b;
+        
+//     }
+
+//     pybind11::tuple result = pybind11::make_tuple(tensor, indices);
+    
+//     return result;
+// }
 
 struct BoundingBox3D
 {

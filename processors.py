@@ -42,10 +42,10 @@ class DataProcessor(Parameters):
                 label.yaw -= (np.pi * 2)
             transformed.append(label)
         return labels
-
+    
     def make_point_pillars(self, points: np.ndarray):
 
-        assert points.ndim == 2
+        assert len(tf.shape(points)) == 2
         assert points.shape[1] == 4
         assert points.dtype == np.float32
 

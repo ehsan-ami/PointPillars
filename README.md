@@ -60,3 +60,12 @@ if __name__ == "__main__":
 model = tf.saved_model.load('model_directory')
 ```
 
+# Install pointpillar
+
+```sh
+mkdir third_party
+cd third_party
+git clone --recurse-submodules git@github.com:ehsan-ami/PointPillars.git
+cd PointPillars 
+pip install -e .
+```
